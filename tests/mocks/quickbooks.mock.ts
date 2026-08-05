@@ -171,7 +171,8 @@ export const mockQuickBooksInstance = {
   updatePaymentMethod: jest.fn(),
   findPaymentMethods: jest.fn(),
 
-  // Budget methods (read-only in QBO v3 API)
+  // Budget methods
+  createBudget: jest.fn(),
   findBudgets: jest.fn(),
 
   // TaxCode methods
