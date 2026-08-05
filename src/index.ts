@@ -43,6 +43,10 @@ import { GetVendorTool } from "./tools/get-vendor.tool.js";
 import { SearchBillsTool } from "./tools/search-bills.tool.js";
 import { SearchVendorsTool } from "./tools/search-vendors.tool.js";
 
+// Authorization tools
+import { ConnectQuickbooksTool } from "./tools/connect-quickbooks.tool.js";
+import { FinishQuickbooksConnectionTool } from "./tools/finish-quickbooks-connection.tool.js";
+
 // Employee tools
 import { CreateEmployeeTool } from "./tools/create-employee.tool.js";
 import { GetEmployeeTool } from "./tools/get-employee.tool.js";
@@ -427,6 +431,10 @@ const main = async () => {
   RegisterTool(server, GetAgedPayablesTool);
   RegisterTool(server, GetVendorExpensesTool);
   RegisterTool(server, GetVendorBalanceTool);
+
+  // Authorization tools
+  RegisterTool(server, ConnectQuickbooksTool);
+  RegisterTool(server, FinishQuickbooksConnectionTool);
 
   // Start receiving messages on stdin and sending messages on stdout
   const transport = new StdioServerTransport();

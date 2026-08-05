@@ -1,0 +1,16 @@
+.env
+.env.*
+.git/
+.github/
+tests/
+docs/
+scripts/
+src/
+sample/
+node_modules/.cache/
+*.log
+*.md
+tsconfig*.json
+jest.config.js
+.gitignore
+dist/auth-server.js

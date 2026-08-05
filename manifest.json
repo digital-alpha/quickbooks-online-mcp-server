@@ -1,0 +1,21 @@
+{
+  "manifest_version": "0.1",
+  "name": "custom-quickbooks",
+  "display_name": "QuickBooks (FinOS)",
+  "version": "1.1.1",
+  "description": "QuickBooks Online tools for the FinOS accounting workflows",
+  "author": { "name": "Digital Alpha" },
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/index.js"],
+      "env": {
+        "FINOS_BROKER_URL": "https://tns3j43iqkkkyn4i6f5o7ovpuy0jqhlq.lambda-url.us-east-1.on.aws",
+        "QUICKBOOKS_DISABLE_DELETE": "true"
+      }
+    }
+  },
+  "compatibility": { "platforms": ["darwin", "win32", "linux"] }
+}

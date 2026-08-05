@@ -5,6 +5,7 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { randomUUID } from 'crypto';
 import open from 'open';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -29,6 +30,13 @@ process.on('unhandledRejection', (reason) => {
   console.error('[auth-server] unhandledRejection:', reason);
 });
 
+import { getBrokerAuth } from "./broker-auth.js";
+
+// ── Broker Mode ──────────────────────────────────────────────────────────────
+// When FINOS_BROKER_URL is set, the client fetches access tokens from the AWS
+// Token Broker Lambda via broker-auth.ts.
+const BROKER_URL = process.env.FINOS_BROKER_URL;
+
 const client_id = process.env.QUICKBOOKS_CLIENT_ID;
 const client_secret = process.env.QUICKBOOKS_CLIENT_SECRET;
 const refresh_token = process.env.QUICKBOOKS_REFRESH_TOKEN;
@@ -37,9 +45,10 @@ const environment = process.env.QUICKBOOKS_ENVIRONMENT || 'sandbox';
 // Fix for Issue #5: Use env var with underscore (QUICKBOOKS_REDIRECT_URI)
 const redirect_uri = process.env.QUICKBOOKS_REDIRECT_URI || 'http://localhost:8000/callback';
 
-// Only throw error if client_id or client_secret is missing
-if (!client_id || !client_secret || !redirect_uri) {
-  throw Error("Client ID, Client Secret and Redirect URI must be set in environment variables");
+// In broker mode, client_id/client_secret are not required locally.
+// In local mode, they are mandatory.
+if (!BROKER_URL && (!client_id || !client_secret || !redirect_uri)) {
+  throw Error("Either set FINOS_BROKER_URL for broker mode, or set Client ID, Client Secret and Redirect URI for local mode.");
 }
 
 // ── QuickbooksClient ─────────────────────────────────────────────────────────
@@ -213,37 +222,85 @@ export class QuickbooksClient {
         }
       });
 
-      // Start server — bind to all interfaces (IPv4 + IPv6) so ngrok can reach it
-      // regardless of whether it resolves `localhost` to 127.0.0.1 or ::1
-      server.listen(port, '::', async () => {
-        const addr = server.address();
-        console.log(`[auth-server] Listening on ${typeof addr === 'string' ? addr : `${addr?.address}:${addr?.port}`} (family: ${typeof addr === 'object' ? addr?.family : 'n/a'})`);
+      // ── Cross-platform server binding ─────────────────────────────────────
+      // Attempt 1: IPv6 dual-stack (::) — works on macOS, Linux, and Windows
+      //   with IPv6 enabled. The dual-stack socket also accepts IPv4 traffic,
+      //   so a single bind covers both protocols.
+      // Attempt 2: IPv4 wildcard (0.0.0.0) — fallback for Windows machines
+      //   where the IPv6 stack is disabled (EADDRNOTAVAIL on ::).
+      // Attempt 3: IPv4 loopback only (127.0.0.1) — last resort when all
+      //   interfaces are restricted (e.g. strict enterprise firewalls).
+      const BIND_ATTEMPTS: Array<{ host: string; label: string }> = [
+        { host: '::', label: 'IPv6 dual-stack' },
+        { host: '0.0.0.0', label: 'IPv4 wildcard' },
+        { host: '127.0.0.1', label: 'IPv4 loopback' },
+      ];
 
-        // Generate authorization URL with proper type assertion
-        const authUri = flowClient.authorizeUri({
-          scope: [OAuthClient.scopes.Accounting as string],
-          state: 'testState'
-        }).toString();
-
-        console.log('\n=== QuickBooks Authorization ===');
-        console.log('Open this URL in a browser to authorize:\n');
-        console.log(authUri);
-        console.log('\nWaiting for callback...\n');
-
-        // Attempt to open the browser automatically; ignore failures on headless systems
-        try {
-          await open(authUri);
-        } catch {
-          // Headless environment — user will open the URL manually
+      const tryListen = (attempts: typeof BIND_ATTEMPTS): void => {
+        if (attempts.length === 0) {
+          this.isAuthenticating = false;
+          reject(new Error(
+            `Could not bind to port ${port} on any interface. ` +
+            `Make sure no other process is using port ${port} and try again.`
+          ));
+          return;
         }
-      });
+        const [{ host, label }, ...rest] = attempts;
 
-      // Handle server errors
-      server.on('error', (error) => {
-        console.error('Server error:', error);
-        this.isAuthenticating = false;
-        reject(error);
-      });
+        server.removeAllListeners('error');
+        server.on('error', (error: NodeJS.ErrnoException) => {
+          if (
+            (error.code === 'EADDRNOTAVAIL' || error.code === 'EAFNOSUPPORT') &&
+            rest.length > 0
+          ) {
+            // IPv6 unavailable on this machine — retry with the next address
+            console.error(
+              `[auth-server] ${label} unavailable (${error.code}), ` +
+              `trying ${rest[0]?.label}…`
+            );
+            server.close(() => tryListen(rest));
+          } else if (error.code === 'EADDRINUSE') {
+            this.isAuthenticating = false;
+            reject(new Error(
+              `Port ${port} is already in use. Close the application using ` +
+              `that port, or set QUICKBOOKS_REDIRECT_URI to a different port.`
+            ));
+          } else {
+            console.error('[auth-server] Server error:', error);
+            this.isAuthenticating = false;
+            reject(error);
+          }
+        });
+
+        server.listen(port, host, async () => {
+          const addr = server.address();
+          console.log(
+            `[auth-server] Listening on ` +
+            `${typeof addr === 'string' ? addr : `${addr?.address}:${addr?.port}`} ` +
+            `(${label})`
+          );
+
+          const authUri = flowClient.authorizeUri({
+            scope: [OAuthClient.scopes.Accounting as string],
+            state: randomUUID(),
+          }).toString();
+
+          console.log('\n=== QuickBooks Authorization ===');
+          console.log('Open this URL in a browser to authorize:\n');
+          console.log(authUri);
+          console.log('\nWaiting for callback…\n');
+
+          // Attempt to open the browser automatically; ignore failures on
+          // headless systems or distros without xdg-open configured.
+          try {
+            await open(authUri);
+          } catch {
+            // Headless environment — user will open the URL manually
+          }
+        });
+      };
+
+      tryListen(BIND_ATTEMPTS);
     });
   }
 
@@ -452,7 +509,21 @@ export class QuickbooksClient {
   // ── Called by every handler on every request ─────────────────────────────
   // Checks token freshness on each invocation so handlers stay functional
   // across 60-minute token boundaries without server restarts.
+  //
+  // In Broker Mode, delegates to getBrokerAuth() in broker-auth.ts.
   static async getInstance(): Promise<QuickBooks> {
+    if (BROKER_URL) {
+      const { accessToken, realmId, isSandbox } = await getBrokerAuth();
+      return new QuickBooks(
+        "", "",          // client id/secret unused: no in-process refresh
+        accessToken,
+        false,           // no token secret under OAuth 2.0
+        realmId,
+        isSandbox,
+        false, null, "2.0",
+        undefined        // no refresh token on this machine
+      );
+    }
     if (quickbooksClient.isTokenExpiredOrExpiringSoon()) {
       await quickbooksClient.authenticate();
     }
@@ -467,6 +538,9 @@ export class QuickbooksClient {
   // (e.g. POST /upload for binary attachments). Ensures token freshness on
   // every invocation, same as getInstance().
   static async getAuthCredentials(): Promise<{ accessToken: string; realmId: string; isSandbox: boolean }> {
+    if (BROKER_URL) {
+      return getBrokerAuth();
+    }
     if (quickbooksClient.isTokenExpiredOrExpiringSoon() || !quickbooksClient.accessToken) {
       await quickbooksClient.authenticate();
     }
@@ -488,11 +562,13 @@ export class QuickbooksClient {
   }
 }
 
+// In broker mode, create a minimal client instance (token fetching is handled
+// by the static broker helpers, not the instance methods).
 export const quickbooksClient = new QuickbooksClient({
-  clientId: client_id,
-  clientSecret: client_secret,
+  clientId: client_id || 'broker',
+  clientSecret: client_secret || 'broker',
   refreshToken: refresh_token,
   realmId: realm_id,
   environment: environment,
-  redirectUri: redirect_uri,
+  redirectUri: redirect_uri || 'https://unused-in-broker-mode',
 });
