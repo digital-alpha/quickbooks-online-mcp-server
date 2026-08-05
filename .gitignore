@@ -18,3 +18,4 @@ capture-*.txt
 *.dxt
 *.mcpb
 response.json
+sample/
