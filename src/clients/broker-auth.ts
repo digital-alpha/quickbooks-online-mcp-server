@@ -1,6 +1,6 @@
-import { mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
+import { homedir } from 'os';
+import { join } from 'path';
 
 /**
  * QuickBooks auth against the hosted broker, using a device-authorization flow

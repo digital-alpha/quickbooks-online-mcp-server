@@ -30,20 +30,18 @@ process.on('unhandledRejection', (reason) => {
   console.error('[auth-server] unhandledRejection:', reason);
 });
 
-import { getBrokerAuth } from "./broker-auth.js";
-
 // ── Broker Mode ──────────────────────────────────────────────────────────────
 // When FINOS_BROKER_URL is set, the client fetches access tokens from the AWS
 // Token Broker Lambda via broker-auth.ts.
 const BROKER_URL = process.env.FINOS_BROKER_URL;
 
-const client_id = process.env.QUICKBOOKS_CLIENT_ID;
-const client_secret = process.env.QUICKBOOKS_CLIENT_SECRET;
-const refresh_token = process.env.QUICKBOOKS_REFRESH_TOKEN;
-const realm_id = process.env.QUICKBOOKS_REALM_ID;
-const environment = process.env.QUICKBOOKS_ENVIRONMENT || 'sandbox';
-// Fix for Issue #5: Use env var with underscore (QUICKBOOKS_REDIRECT_URI)
-const redirect_uri = process.env.QUICKBOOKS_REDIRECT_URI || 'http://localhost:8000/callback';
+const client_id = process.env.QUICKBOOKS_CLIENT_ID || process.env.QBO_CLIENT_ID;
+const client_secret = process.env.QUICKBOOKS_CLIENT_SECRET || process.env.QBO_CLIENT_SECRET;
+const refresh_token = process.env.QUICKBOOKS_REFRESH_TOKEN || process.env.QBO_REFRESH_TOKEN;
+const realm_id = process.env.QUICKBOOKS_REALM_ID || process.env.QBO_REALM_ID;
+const environment = process.env.QUICKBOOKS_ENVIRONMENT || process.env.QBO_ENVIRONMENT || 'sandbox';
+// Fix for Issue #5: Use env var with underscore (QUICKBOOKS_REDIRECT_URI) or REDIRECT_URI
+const redirect_uri = process.env.QUICKBOOKS_REDIRECT_URI || process.env.REDIRECT_URI || process.env.QBO_REDIRECT_URI || 'http://localhost:8000/callback';
 
 // In broker mode, client_id/client_secret are not required locally.
 // In local mode, they are mandatory.
@@ -247,7 +245,7 @@ export class QuickbooksClient {
         }
         const [{ host, label }, ...rest] = attempts;
 
-        server.removeAllListeners('error');
+        (server as any).removeAllListeners?.('error');
         server.on('error', (error: NodeJS.ErrnoException) => {
           if (
             (error.code === 'EADDRNOTAVAIL' || error.code === 'EAFNOSUPPORT') &&
@@ -513,6 +511,7 @@ export class QuickbooksClient {
   // In Broker Mode, delegates to getBrokerAuth() in broker-auth.ts.
   static async getInstance(): Promise<QuickBooks> {
     if (BROKER_URL) {
+      const { getBrokerAuth } = await import('./broker-auth.js');
       const { accessToken, realmId, isSandbox } = await getBrokerAuth();
       return new QuickBooks(
         "", "",          // client id/secret unused: no in-process refresh
@@ -539,6 +538,7 @@ export class QuickbooksClient {
   // every invocation, same as getInstance().
   static async getAuthCredentials(): Promise<{ accessToken: string; realmId: string; isSandbox: boolean }> {
     if (BROKER_URL) {
+      const { getBrokerAuth } = await import('./broker-auth.js');
       return getBrokerAuth();
     }
     if (quickbooksClient.isTokenExpiredOrExpiringSoon() || !quickbooksClient.accessToken) {
