@@ -162,8 +162,9 @@ import { GetPaymentMethodTool } from "./tools/get-payment-method.tool.js";
 import { UpdatePaymentMethodTool } from "./tools/update-payment-method.tool.js";
 import { SearchPaymentMethodsTool } from "./tools/search-payment-methods.tool.js";
 
-// Budget tools (read-only in QBO v3 API)
+// Budget tools
 import { SearchBudgetsTool } from "./tools/search-budgets.tool.js";
+import { CreateBudgetTool } from "./tools/create-budget.tool.js";
 
 // Tax Code tools
 import { GetTaxCodeTool } from "./tools/get-tax-code.tool.js";
@@ -389,7 +390,8 @@ const main = async () => {
   RegisterTool(server, UpdatePaymentMethodTool);
   RegisterTool(server, SearchPaymentMethodsTool);
 
-  // Add tools for budgets (read-only)
+  // Add tools for budgets
+  RegisterTool(server, CreateBudgetTool);
   RegisterTool(server, SearchBudgetsTool);
 
   // Add tools for tax codes

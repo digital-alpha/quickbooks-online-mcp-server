@@ -3,7 +3,7 @@ import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
 
 const toolName = "search_budgets";
-const toolDescription = "Search for budgets in QuickBooks Online. Returns Budget records with nested BudgetDetail line items (Amount, BudgetDate, AccountRef, ClassRef, CustomerRef, DepartmentRef, LocationRef). Budget is read-only in the QBO v3 API.";
+const toolDescription = "Search for budgets in QuickBooks Online. Returns Budget records with nested BudgetDetail line items (Amount, BudgetDate, AccountRef, ClassRef, CustomerRef, DepartmentRef, LocationRef).";
 const toolSchema = z.object({
   name: z.string().optional().describe("Filter by budget name"),
   active: z.boolean().optional().describe("Filter by active status"),
