@@ -2,7 +2,7 @@
   "manifest_version": "0.1",
   "name": "custom-quickbooks",
   "display_name": "QuickBooks (FinOS)",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "QuickBooks Online tools for the FinOS accounting workflows",
   "author": { "name": "Digital Alpha" },
   "server": {
