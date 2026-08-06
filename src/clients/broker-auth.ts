@@ -226,6 +226,24 @@ export function isConnected(): boolean {
   return !!readCredential();
 }
 
+/**
+ * Disconnects QuickBooks Online by removing local credential files and resetting
+ * in-memory cached tokens.
+ */
+export function disconnectQuickbooks(): void {
+  cachedToken = undefined;
+  try {
+    unlinkSync(CRED_PATH);
+  } catch {
+    /* file didn't exist or already removed */
+  }
+  try {
+    unlinkSync(PENDING_PATH);
+  } catch {
+    /* file didn't exist or already removed */
+  }
+}
+
 // ---------------------------------------------------------------- token access
 
 const isFresh = (token: BrokerToken | undefined): token is BrokerToken =>
