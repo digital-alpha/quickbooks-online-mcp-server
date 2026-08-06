@@ -1,9 +1,10 @@
-import { startAuthorization } from "../clients/broker-auth.js";
+import { startAuthorization, disconnectQuickbooks } from "../clients/broker-auth.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
 export async function connectQuickbooks(): Promise<ToolResponse<any>> {
   try {
+    disconnectQuickbooks();
     const { authUrl } = await startAuthorization();
     return {
       result: {

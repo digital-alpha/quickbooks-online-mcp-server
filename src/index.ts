@@ -46,6 +46,7 @@ import { SearchVendorsTool } from "./tools/search-vendors.tool.js";
 // Authorization tools
 import { ConnectQuickbooksTool } from "./tools/connect-quickbooks.tool.js";
 import { FinishQuickbooksConnectionTool } from "./tools/finish-quickbooks-connection.tool.js";
+import { DisconnectQuickbooksTool } from "./tools/disconnect-quickbooks.tool.js";
 
 // Employee tools
 import { CreateEmployeeTool } from "./tools/create-employee.tool.js";
@@ -437,6 +438,7 @@ const main = async () => {
   // Authorization tools
   RegisterTool(server, ConnectQuickbooksTool);
   RegisterTool(server, FinishQuickbooksConnectionTool);
+  RegisterTool(server, DisconnectQuickbooksTool);
 
   // Start receiving messages on stdin and sending messages on stdout
   const transport = new StdioServerTransport();
