@@ -3,6 +3,36 @@ import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 import QuickBooks from "node-quickbooks";
 
+// Ensure createBudget is monkey-patched onto QuickBooks.prototype for node-quickbooks instances
+if (QuickBooks && QuickBooks.prototype && !(QuickBooks.prototype as any).createBudget) {
+  (QuickBooks.prototype as any).createBudget = function (this: any, budget: any, callback: any) {
+    const baseUrl = this.endpoint || (this.useSandbox ? "https://sandbox-quickbooks.api.intuit.com/v3/company/" : "https://quickbooks.api.intuit.com/v3/company/");
+    const realmId = this.realmId;
+    const token = this.token;
+    const minorversion = this.minorversion || 75;
+    const url = `${baseUrl.endsWith("/") ? baseUrl : baseUrl + "/"}${realmId}/budget?minorversion=${minorversion}`;
+
+    fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(budget),
+    })
+      .then(async (res) => {
+        const json = await res.json();
+        if (!res.ok || json.Fault) {
+          callback(json.Fault || json, null);
+        } else {
+          callback(null, json.Budget || json);
+        }
+      })
+      .catch((err) => callback(err, null));
+  };
+}
+
 export interface BudgetDetailInput {
   BudgetDate?: string;
   budget_date?: string;
@@ -104,19 +134,46 @@ export async function createQuickbooksBudget(data: CreateBudgetInput): Promise<T
       });
     }
 
-    return new Promise((resolve) => {
-      const createFn = (quickbooks as any).createBudget
-        ? (quickbooks as any).createBudget.bind(quickbooks)
-        : (budgetPayload: any, cb: any) => (QuickBooks as any).create(quickbooks, "budget", budgetPayload, cb);
-
-      createFn(payload, (err: any, created: any) => {
-        if (err) {
-          resolve({ result: null, isError: true, error: formatError(err) });
-        } else {
-          resolve({ result: created, isError: false, error: null });
-        }
+    if (typeof (quickbooks as any).createBudget === "function") {
+      return new Promise((resolve) => {
+        (quickbooks as any).createBudget(payload, (err: any, created: any) => {
+          if (err) {
+            resolve({ result: null, isError: true, error: formatError(err) });
+          } else {
+            resolve({ result: created, isError: false, error: null });
+          }
+        });
       });
+    }
+
+    const { accessToken, realmId, isSandbox } = await QuickbooksClient.getAuthCredentials();
+    const baseUrl = isSandbox ? "https://sandbox-quickbooks.api.intuit.com" : "https://quickbooks.api.intuit.com";
+    const url = `${baseUrl}/v3/company/${realmId}/budget?minorversion=75`;
+
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(payload),
     });
+
+    const responseData = await res.json();
+    if (!res.ok || responseData.Fault) {
+      return {
+        result: null,
+        isError: true,
+        error: formatError(responseData.Fault || responseData),
+      };
+    }
+
+    return {
+      result: responseData.Budget || responseData,
+      isError: false,
+      error: null,
+    };
   } catch (error) {
     return { result: null, isError: true, error: formatError(error) };
   }

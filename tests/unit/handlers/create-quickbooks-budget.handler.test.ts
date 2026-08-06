@@ -1,13 +1,12 @@
 import { jest, describe, it, expect, beforeEach } from '@jest/globals';
 import { mockQuickbooksClient, mockQuickbooksClientClass, mockQuickBooksInstance, resetAllMocks } from '../../mocks/quickbooks.mock';
-import QuickBooks from 'node-quickbooks';
 
 jest.unstable_mockModule('../../../src/clients/quickbooks-client', () => ({
   quickbooksClient: mockQuickbooksClient,
   QuickbooksClient: mockQuickbooksClientClass,
 }));
 
-const { createQuickbooksBudget } = await import('../../../src/handlers/create-quickbooks-budget.handler');
+const { createQuickbooksBudget } = await import('../../../src/handlers/create-quickbooks-budget.handler.js');
 
 describe('createQuickbooksBudget Handler', () => {
   beforeEach(() => {
@@ -89,21 +88,25 @@ describe('createQuickbooksBudget Handler', () => {
     expect(result.result).toEqual(mockCreatedBudget);
   });
 
-  it('should fall back to QuickBooks.create when createBudget is not defined on instance', async () => {
-    const mockCreatedBudget = { Id: '103', Name: 'Fallback Test' };
+  it('should fall back to HTTP fetch when createBudget is not defined on instance', async () => {
+    const mockCreatedBudget = { Id: '103', Name: 'Fetch Fallback Test' };
 
     delete (mockQuickBooksInstance as any).createBudget;
 
-    (QuickBooks as any).create = jest.fn((_qb: any, _entity: string, _payload: any, cb: any) => {
-      cb(null, mockCreatedBudget);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (jest.fn() as any).mockResolvedValue({
+      ok: true,
+      json: async () => ({ Budget: mockCreatedBudget }),
     });
 
     const result = await createQuickbooksBudget({
-      name: 'Fallback Test',
+      name: 'Fetch Fallback Test',
     });
 
     expect(result.isError).toBe(false);
     expect(result.result).toEqual(mockCreatedBudget);
+
+    globalThis.fetch = originalFetch;
   });
 
   it('should handle API errors properly', async () => {
