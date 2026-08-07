@@ -75,6 +75,7 @@ const fakeServer = {
   }),
   close: jest.fn(),
   on: jest.fn(),
+  removeAllListeners: jest.fn(),
   address: jest.fn(() => ({ address: '::', port: 8000, family: 'IPv6' })),
 };
 jest.unstable_mockModule('http', () => ({

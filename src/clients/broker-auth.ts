@@ -1,24 +1,16 @@
-import { mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
-
 /**
  * QuickBooks auth against the hosted broker, using a device-authorization flow
  * so no credential ever passes through the conversation.
  *
  * Credential resolution order:
- *   1. ~/.finos/qbo-credential.json  (written by the connect tool)
+ *   1. In-memory runtime credential (written by the connect tool for this session)
  *   2. FINOS_CREDENTIAL              (set from user_config at install)
  *
- * The file takes precedence so re-authorizing through chat overrides a stale
- * installed value without touching extension settings or requiring a restart.
+ * Credentials and authorization states are kept in runtime memory for the session scope
+ * and are not persisted to local files on disk.
  */
 
 const BROKER_URL = (process.env.FINOS_BROKER_URL ?? '').replace(/\/+$/, '');
-
-const FINOS_DIR = join(homedir(), '.finos');
-const CRED_PATH = join(FINOS_DIR, 'qbo-credential.json');
-const PENDING_PATH = join(FINOS_DIR, 'qbo-pending.json');
 
 /** Refresh early so a call never races the expiry. */
 const EXPIRY_SKEW_SECONDS = 120;
@@ -48,50 +40,33 @@ export class NotConnectedError extends Error {
 
 let cachedToken: BrokerToken | undefined;
 let inFlight: Promise<BrokerToken> | undefined;
+let inMemoryDeviceCredential: string | undefined;
+let inMemoryRealmId: string | undefined;
+let pendingAuth: { pollToken: string; expiresAt: number } | undefined;
 
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 
-// ---------------------------------------------------------------- local files
-
-function ensureDir(): void {
-  mkdirSync(FINOS_DIR, { recursive: true, mode: 0o700 });
-}
-
-function readJson<T>(path: string): T | undefined {
-  try {
-    return JSON.parse(readFileSync(path, 'utf8')) as T;
-  } catch {
-    return undefined;
-  }
-}
-
-function writeJson(path: string, value: unknown): void {
-  ensureDir();
-  // 0600: readable only by this user. Contains a bearer-equivalent credential.
-  writeFileSync(path, JSON.stringify(value), { mode: 0o600 });
-}
+// ---------------------------------------------------------------- session runtime memory
 
 function readCredential(): string | undefined {
-  const stored = readJson<{ device_credential?: string }>(CRED_PATH);
-  return stored?.device_credential || process.env.FINOS_CREDENTIAL || undefined;
+  return inMemoryDeviceCredential;
 }
 
 function saveCredential(deviceCredential: string, realmId?: string): void {
-  writeJson(CRED_PATH, {
-    device_credential: deviceCredential,
-    realm_id: realmId,
-    saved_at: new Date().toISOString(),
-  });
+  inMemoryDeviceCredential = deviceCredential;
+  inMemoryRealmId = realmId;
   // A newly saved credential invalidates any token cached for the old one.
   cachedToken = undefined;
 }
 
 // ---------------------------------------------------------------- broker calls
 
-function assertConfigured(): void {
-  if (!BROKER_URL) {
+function getBrokerUrl(): string {
+  const url = (process.env.FINOS_BROKER_URL ?? '').replace(/\/+$/, '');
+  if (!url) {
     throw new Error('FINOS_BROKER_URL is not configured for this extension.');
   }
+  return url;
 }
 
 async function handleResponse<T>(response: Response): Promise<T> {
@@ -110,11 +85,11 @@ async function handleResponse<T>(response: Response): Promise<T> {
 
 /** Used by /authorize and /poll, which take JSON request bodies. */
 async function brokerPost<T>(path: string, body?: unknown): Promise<T> {
-  assertConfigured();
+  const brokerUrl = getBrokerUrl();
 
   let response: Response;
   try {
-    response = await fetch(`${BROKER_URL}${path}`, {
+    response = await fetch(`${brokerUrl}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: body === undefined ? '{}' : JSON.stringify(body),
@@ -138,9 +113,9 @@ async function brokerPost<T>(path: string, body?: unknown): Promise<T> {
  * in front, would capture it in plaintext.
  */
 async function brokerGetToken<T>(credential: string): Promise<T> {
-  assertConfigured();
+  const brokerUrl = getBrokerUrl();
 
-  const url = new URL(`${BROKER_URL}/token`);
+  const url = new URL(`${brokerUrl}/token`);
   url.searchParams.set('credential', credential);
 
   let response: Response;
@@ -174,12 +149,11 @@ export async function startAuthorization(): Promise<AuthorizationStart> {
     '/authorize',
   );
 
-  // Persisted rather than held in memory so the flow survives a server restart
-  // between the two tool calls.
-  writeJson(PENDING_PATH, {
-    poll_token: result.poll_token,
-    expires_at: nowSeconds() + PENDING_TTL_SECONDS,
-  });
+  // Stored in runtime memory for the session scope.
+  pendingAuth = {
+    pollToken: result.poll_token,
+    expiresAt: nowSeconds() + PENDING_TTL_SECONDS,
+  };
 
   return { authUrl: result.auth_url };
 }
@@ -194,11 +168,7 @@ export type AuthorizationResult =
  * broker hands over the device credential exactly once and discards its copy.
  */
 export async function completeAuthorization(): Promise<AuthorizationResult> {
-  const pending = readJson<{ poll_token: string; expires_at: number }>(
-    PENDING_PATH,
-  );
-
-  if (!pending || pending.expires_at < nowSeconds()) {
+  if (!pendingAuth || pendingAuth.expiresAt < nowSeconds()) {
     return { status: 'expired' };
   }
 
@@ -206,18 +176,14 @@ export async function completeAuthorization(): Promise<AuthorizationResult> {
     status: 'pending' | 'complete';
     device_credential?: string;
     realm_id?: string;
-  }>('/poll', { poll_token: pending.poll_token });
+  }>('/poll', { poll_token: pendingAuth.pollToken });
 
   if (result.status !== 'complete' || !result.device_credential) {
     return { status: 'pending' };
   }
 
   saveCredential(result.device_credential, result.realm_id);
-  try {
-    unlinkSync(PENDING_PATH);
-  } catch {
-    /* already gone */
-  }
+  pendingAuth = undefined;
 
   return { status: 'connected', realmId: result.realm_id ?? 'unknown' };
 }
@@ -227,21 +193,14 @@ export function isConnected(): boolean {
 }
 
 /**
- * Disconnects QuickBooks Online by removing local credential files and resetting
- * in-memory cached tokens.
+ * Disconnects QuickBooks Online by resetting in-memory credentials and cached tokens
+ * for this session.
  */
 export function disconnectQuickbooks(): void {
   cachedToken = undefined;
-  try {
-    unlinkSync(CRED_PATH);
-  } catch {
-    /* file didn't exist or already removed */
-  }
-  try {
-    unlinkSync(PENDING_PATH);
-  } catch {
-    /* file didn't exist or already removed */
-  }
+  inMemoryDeviceCredential = undefined;
+  inMemoryRealmId = undefined;
+  pendingAuth = undefined;
 }
 
 // ---------------------------------------------------------------- token access
