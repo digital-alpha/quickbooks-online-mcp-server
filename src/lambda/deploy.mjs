@@ -34,8 +34,6 @@ import {
   AttachRolePolicyCommand,
   PutRolePolicyCommand,
 } from "@aws-sdk/client-iam";
-// DynamoDB is no longer used in Phase 2 — all data is in SSM Parameter Store.
-import { SSMClient, PutParameterCommand } from "@aws-sdk/client-ssm";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 
 const REGION = "us-east-1";
@@ -380,35 +378,9 @@ async function main() {
   // DynamoDB table no longer needed — Phase 2 uses SSM Parameter Store.
   const roleArn = await ensureRole(Account);
 
-  const envClientId = process.env.CLIENT_ID || process.env.QUICKBOOKS_CLIENT_ID;
-  const envClientSecret = process.env.CLIENT_SECRET || process.env.QUICKBOOKS_CLIENT_SECRET;
-
-  if (envClientId && envClientSecret) {
-    const ssm = new SSMClient(cfg);
-    await ssm.send(
-      new PutParameterCommand({
-        Name: `${SSM_PREFIX}/client_id`,
-        Value: envClientId,
-        Type: "SecureString",
-        Overwrite: true,
-      })
-    );
-    await ssm.send(
-      new PutParameterCommand({
-        Name: `${SSM_PREFIX}/client_secret`,
-        Value: envClientSecret,
-        Type: "SecureString",
-        Overwrite: true,
-      })
-    );
-    log("seeded client_id and client_secret into SSM Parameter Store");
-  }
-
   const baseEnv = {
     SSM_PREFIX,
     QBO_ENV,
-    ...(envClientId ? { CLIENT_ID: envClientId } : {}),
-    ...(envClientSecret ? { CLIENT_SECRET: envClientSecret } : {}),
   };
 
   // REDIRECT_URI is chicken-and-egg: it must be the auth function's own URL,
@@ -417,7 +389,6 @@ async function main() {
   await ensureFunction("finos-qbo-auth", FUNCTIONS["finos-qbo-auth"], roleArn, {
     ...baseEnv,
     REDIRECT_URI: "pending",
-    TENANT_ID: "default",
   });
   const authUrl = await ensureFunctionUrl("finos-qbo-auth");
 
@@ -428,7 +399,6 @@ async function main() {
         Variables: {
           ...baseEnv,
           REDIRECT_URI: `${authUrl}/callback`,
-          TENANT_ID: "default",
         },
       },
     })

@@ -111,18 +111,11 @@ def get_app_credentials() -> dict:
     """
     Return {'client_id': ..., 'client_secret': ...}.
 
-    Priority:
-      1. Environment variables (CLIENT_ID / QUICKBOOKS_CLIENT_ID, etc.)
-      2. SSM Parameter Store (cached after first fetch per warm container)
+    SSM Parameter Store is the only source — no environment-variable
+    override path, so a stray CLIENT_ID/CLIENT_SECRET env var can never
+    silently take precedence over what's stored in SSM.
     """
     global _param_cache
-
-    env_id = os.environ.get("CLIENT_ID") or os.environ.get("QUICKBOOKS_CLIENT_ID")
-    env_secret = (
-        os.environ.get("CLIENT_SECRET") or os.environ.get("QUICKBOOKS_CLIENT_SECRET")
-    )
-    if env_id and env_secret:
-        return {"client_id": env_id, "client_secret": env_secret}
 
     if _param_cache:
         return _param_cache
