@@ -9,9 +9,9 @@ export async function disconnectQuickbooksHandler(): Promise<ToolResponse<any>> 
       result: {
         status: "disconnected",
         message:
-          "QuickBooks has been disconnected successfully. Stored credentials and " +
-          "cached tokens have been cleared. You can now use connect_quickbooks " +
-          "to authorize another account.",
+          "QuickBooks has been disconnected for this conversation. Credentials and " +
+          "cached tokens for this session have been cleared. Other conversations are " +
+          "unaffected. You can use connect_quickbooks to authorize again.",
       },
       isError: false,
       error: null,

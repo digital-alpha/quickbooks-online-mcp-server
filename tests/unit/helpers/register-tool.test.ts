@@ -4,6 +4,7 @@ import {
   isToolDisabled,
   RegisterTool,
 } from "../../../src/helpers/register-tool";
+import { requireChatId } from "../../../src/helpers/chat-context";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ToolDefinition } from "../../../src/types/tool-definition";
@@ -72,10 +73,11 @@ describe("isToolDisabled", () => {
 });
 
 // ── RegisterTool ─────────────────────────────────────────────────────────────
-// Verifies the integration between isToolDisabled and server.tool():
-//   - Enabled tools are registered with the exact fields from ToolDefinition.
+// Verifies the integration between isToolDisabled and server.tool(), plus
+// the new chat_id injection and context binding:
+//   - Enabled tools are registered with chat_id alongside params.
 //   - Disabled tools cause RegisterTool to return early without calling server.tool().
-// Uses a minimal mock server object to avoid coupling to the MCP SDK internals.
+//   - The handler runs inside a bound chat context.
 
 describe("RegisterTool", () => {
   afterEach(() => {
@@ -89,13 +91,39 @@ describe("RegisterTool", () => {
   const def = (name: string): ToolDefinition<typeof schema> =>
     ({ name, description: `desc:${name}`, schema, handler });
 
-  // Confirm all four ToolDefinition fields are forwarded to server.tool() unchanged.
-  it("calls server.tool() with all definition fields when enabled", () => {
+  it("calls server.tool() with chat_id injected alongside params in schema", () => {
     const server = { tool: jest.fn() } as unknown as McpServer;
     const d = def("get_invoice");
     RegisterTool(server, d);
     expect(server.tool).toHaveBeenCalledTimes(1);
-    expect(server.tool).toHaveBeenCalledWith(d.name, d.description, { params: d.schema }, d.handler);
+
+    const callArgs = (server.tool as jest.Mock).mock.calls[0];
+    // callArgs: [name, description, schema, wrappedHandler]
+    expect(callArgs[0]).toBe(d.name);
+    expect(callArgs[1]).toBe(d.description);
+
+    // Schema must have both params and chat_id
+    const registeredSchema = callArgs[2] as Record<string, unknown>;
+    expect(registeredSchema).toHaveProperty("params");
+    expect(registeredSchema).toHaveProperty("chat_id");
+  });
+
+  it("handler executes inside a bound chat context (requireChatId resolves)", async () => {
+    let capturedChatId: string | undefined;
+    const contextHandler = jest.fn(async () => {
+      capturedChatId = requireChatId();
+      return { content: [{ type: "text" as const, text: "ok" }] };
+    }) as ToolDefinition<typeof schema>["handler"];
+
+    const server = { tool: jest.fn() } as unknown as McpServer;
+    RegisterTool(server, { name: "get_test", description: "test", schema, handler: contextHandler });
+
+    const callArgs = (server.tool as jest.Mock).mock.calls[0];
+    const wrappedHandler = callArgs[3] as CallableFunction;
+
+    // Simulate a tool call with chat_id
+    await wrappedHandler({ params: { id: "123" }, chat_id: "test-uuid-abc" }, {});
+    expect(capturedChatId).toBe("test-uuid-abc");
   });
 
   // One test per mutable category to confirm the early-return path is reached.

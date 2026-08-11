@@ -5,5 +5,5 @@ export interface ToolDefinition<T extends z.ZodType<any, any>> {
   name: string;
   description: string;
   schema: T;
-  handler: ToolCallback<{ [key: string]: T }>;
+  handler: ToolCallback<Record<string, z.ZodType>>;
 }

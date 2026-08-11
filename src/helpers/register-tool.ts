@@ -1,6 +1,7 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
+import { runWithChatId } from "./chat-context.js";
 
 /**
  * Defines CRUD categories for tools
@@ -59,20 +60,37 @@ export function isToolDisabled(toolName: string): boolean {
   return process.env[DISABLE_ENV[category]] === "true";
 }
 
+const CHAT_ID_DESCRIPTION =
+  'Stable identifier for the current conversation. On your first QuickBooks ' +
+  'tool call in a conversation, generate a random UUID and use it here. For ' +
+  'every later QuickBooks call in the same conversation, reuse that exact ' +
+  'same value — read it back from your earlier tool call rather than ' +
+  'generating a new one. Never reuse a value from a different conversation.';
+
 /** 
  * Registers a tool with the MCP server if it is not disabled.
  * Tools are categorized by their name prefix (e.g. create_, update_, delete_).
  * The corresponding environment variable (e.g. QUICKBOOKS_DISABLE_WRITE) determines if the tool is registered.
+ *
+ * Every registered tool receives an additional `chat_id` parameter (sibling of `params`)
+ * that the model must supply. The handler runs inside a chat context so broker-auth
+ * can resolve per-conversation session state via AsyncLocalStorage.
  */
 export function RegisterTool<T extends z.ZodType<any, any>>(
   server: McpServer,
   toolDefinition: ToolDefinition<T>
 ) {
   if (isToolDisabled(toolDefinition.name)) return;
-  server.tool(
-    toolDefinition.name,
-    toolDefinition.description,
-    { params: toolDefinition.schema },
-    toolDefinition.handler
+
+  const schema: z.ZodRawShape = {
+    params: toolDefinition.schema,
+    chat_id: z.string().min(1).describe(CHAT_ID_DESCRIPTION),
+  };
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  server.tool(toolDefinition.name, toolDefinition.description, schema, ((args: any, extra: any) =>
+    runWithChatId(args.chat_id as string, () =>
+      (toolDefinition.handler as CallableFunction)(args, extra),
+    )) as ToolCallback<z.ZodRawShape>,
   );
 }

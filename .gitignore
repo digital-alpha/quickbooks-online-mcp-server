@@ -19,3 +19,4 @@ capture-*.txt
 *.mcpb
 response.json
 sample/
+docs/

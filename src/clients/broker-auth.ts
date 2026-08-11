@@ -2,13 +2,19 @@
  * QuickBooks auth against the hosted broker, using a device-authorization flow
  * so no credential ever passes through the conversation.
  *
- * Credential resolution order:
- *   1. In-memory runtime credential (written by the connect tool for this session)
- *   2. FINOS_CREDENTIAL              (set from user_config at install)
+ * Credential storage:
+ *   All authorization states and tokens are held in a runtime Map keyed by
+ *   `chat_id` (resolved from AsyncLocalStorage). Each conversation gets its own
+ *   isolated session bucket — a fresh chat_id has no credential, and must run
+ *   the connect tool before any data calls succeed.
  *
- * Credentials and authorization states are kept in runtime memory for the session scope
- * and are not persisted to local files on disk.
+ *   Sessions are evicted after a configurable TTL (default 2 hours) to prevent
+ *   unbounded memory growth, since the MCP client never signals "chat closed."
+ *
+ * Credentials are never persisted to local files on disk.
  */
+
+import { requireChatId } from '../helpers/chat-context.js';
 
 const BROKER_URL = (process.env.FINOS_BROKER_URL ?? '').replace(/\/+$/, '');
 
@@ -38,25 +44,58 @@ export class NotConnectedError extends Error {
   }
 }
 
-let cachedToken: BrokerToken | undefined;
-let inFlight: Promise<BrokerToken> | undefined;
-let inMemoryDeviceCredential: string | undefined;
-let inMemoryRealmId: string | undefined;
-let pendingAuth: { pollToken: string; expiresAt: number } | undefined;
+// ---------------------------------------------------------------- per-session state
+
+interface SessionState {
+  deviceCredential?: string;
+  realmId?: string;
+  pendingAuth?: { pollToken: string; expiresAt: number };
+  cachedToken?: BrokerToken;
+  inFlight?: Promise<BrokerToken>;
+  lastAccessed: number; // epoch seconds, for eviction
+}
+
+const sessions = new Map<string, SessionState>();
 
 const nowSeconds = () => Math.floor(Date.now() / 1000);
+
+function getSession(chatId: string): SessionState {
+  let session = sessions.get(chatId);
+  if (!session) {
+    session = { lastAccessed: nowSeconds() };
+    sessions.set(chatId, session);
+  }
+  session.lastAccessed = nowSeconds();
+  return session;
+}
+
+// ---------------------------------------------------------------- TTL eviction
+
+const SESSION_TTL_SECONDS = Number(process.env.FINOS_SESSION_TTL_SECONDS ?? 7200); // 2h
+const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+
+const sweep = setInterval(() => {
+  const cutoff = nowSeconds() - SESSION_TTL_SECONDS;
+  for (const [chatId, session] of sessions) {
+    if (session.lastAccessed < cutoff) sessions.delete(chatId);
+  }
+}, SWEEP_INTERVAL_MS);
+
+sweep.unref(); // must not hold the process open
 
 // ---------------------------------------------------------------- session runtime memory
 
 function readCredential(): string | undefined {
-  return inMemoryDeviceCredential;
+  const session = getSession(requireChatId());
+  return session.deviceCredential;
 }
 
 function saveCredential(deviceCredential: string, realmId?: string): void {
-  inMemoryDeviceCredential = deviceCredential;
-  inMemoryRealmId = realmId;
+  const session = getSession(requireChatId());
+  session.deviceCredential = deviceCredential;
+  session.realmId = realmId;
   // A newly saved credential invalidates any token cached for the old one.
-  cachedToken = undefined;
+  session.cachedToken = undefined;
 }
 
 // ---------------------------------------------------------------- broker calls
@@ -149,8 +188,9 @@ export async function startAuthorization(): Promise<AuthorizationStart> {
     '/authorize',
   );
 
-  // Stored in runtime memory for the session scope.
-  pendingAuth = {
+  // Stored in the session bucket for this chat.
+  const session = getSession(requireChatId());
+  session.pendingAuth = {
     pollToken: result.poll_token,
     expiresAt: nowSeconds() + PENDING_TTL_SECONDS,
   };
@@ -168,7 +208,9 @@ export type AuthorizationResult =
  * broker hands over the device credential exactly once and discards its copy.
  */
 export async function completeAuthorization(): Promise<AuthorizationResult> {
-  if (!pendingAuth || pendingAuth.expiresAt < nowSeconds()) {
+  const session = getSession(requireChatId());
+
+  if (!session.pendingAuth || session.pendingAuth.expiresAt < nowSeconds()) {
     return { status: 'expired' };
   }
 
@@ -176,14 +218,14 @@ export async function completeAuthorization(): Promise<AuthorizationResult> {
     status: 'pending' | 'complete';
     device_credential?: string;
     realm_id?: string;
-  }>('/poll', { poll_token: pendingAuth.pollToken });
+  }>('/poll', { poll_token: session.pendingAuth.pollToken });
 
   if (result.status !== 'complete' || !result.device_credential) {
     return { status: 'pending' };
   }
 
   saveCredential(result.device_credential, result.realm_id);
-  pendingAuth = undefined;
+  session.pendingAuth = undefined;
 
   return { status: 'connected', realmId: result.realm_id ?? 'unknown' };
 }
@@ -193,14 +235,12 @@ export function isConnected(): boolean {
 }
 
 /**
- * Disconnects QuickBooks Online by resetting in-memory credentials and cached tokens
- * for this session.
+ * Disconnects QuickBooks Online by clearing this conversation's session bucket.
+ * Other conversations' connections are unaffected.
  */
 export function disconnectQuickbooks(): void {
-  cachedToken = undefined;
-  inMemoryDeviceCredential = undefined;
-  inMemoryRealmId = undefined;
-  pendingAuth = undefined;
+  const chatId = requireChatId();
+  sessions.delete(chatId);
 }
 
 // ---------------------------------------------------------------- token access
@@ -228,22 +268,26 @@ async function fetchToken(): Promise<BrokerToken> {
  * Returns a valid access token, reusing the cached one where possible.
  *
  * The server is a long-lived process, so this reaches the broker roughly once
- * an hour rather than once per tool call. Concurrent callers share one fetch.
+ * an hour rather than once per tool call. Concurrent callers within the same
+ * chat share one fetch via the per-session `inFlight` promise; callers from
+ * different chats each resolve their own session independently.
  */
 export async function getBrokerAuth(): Promise<QboAuth> {
-  if (!isFresh(cachedToken)) {
-    inFlight ??= fetchToken()
+  const session = getSession(requireChatId());
+
+  if (!isFresh(session.cachedToken)) {
+    session.inFlight ??= fetchToken()
       .then((token) => {
-        cachedToken = token;
+        session.cachedToken = token;
         return token;
       })
       .finally(() => {
-        inFlight = undefined;
+        session.inFlight = undefined;
       });
-    await inFlight;
+    await session.inFlight;
   }
 
-  const token = cachedToken!;
+  const token = session.cachedToken!;
   return {
     accessToken: token.access_token,
     realmId: token.realm_id,
@@ -251,7 +295,18 @@ export async function getBrokerAuth(): Promise<QboAuth> {
   };
 }
 
-/** Drops the cached token. Call if QuickBooks rejects it mid-session. */
+/** Drops the cached token for this chat. Call if QuickBooks rejects it mid-session. */
 export function invalidateBrokerAuth(): void {
-  cachedToken = undefined;
+  const session = getSession(requireChatId());
+  session.cachedToken = undefined;
+}
+
+// ---------------------------------------------------------------- test helpers
+
+/**
+ * Exposed for test teardown only. Clears all sessions.
+ * @internal
+ */
+export function _resetAllSessions(): void {
+  sessions.clear();
 }
