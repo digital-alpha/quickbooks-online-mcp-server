@@ -315,7 +315,7 @@ def sweep_expired() -> None:
     """Opportunistic cleanup. Parameter Store has no TTL of its own."""
     deleted = 0
     paginator = _ssm.get_paginator("get_parameters_by_path")
-    for folder in ("states", "pending"):
+    for folder in ("states", "pending", "codes"):
         try:
             for page_res in paginator.paginate(Path=f"{SSM_PREFIX}/{folder}/", Recursive=False):
                 batch = []
