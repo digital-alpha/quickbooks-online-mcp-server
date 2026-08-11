@@ -7,12 +7,24 @@
  *   node deploy.mjs          create or update everything
  *   node deploy.mjs --urls   print the endpoint URLs and exit
  *
- * Run once first, with values from your Intuit app's Keys & credentials page:
+ * Run once first, with values from your Intuit app's Keys & credentials page.
+ * Seed the sandbox pair before ever deploying dual-environment code — the
+ * existing tenants default to "sandbox" and will fail to mint tokens if this
+ * path is missing:
  *
  *   aws ssm put-parameter --region us-east-1 \
- *     --name /finos/qbo/client_id --type SecureString --value '...'
+ *     --name /finos/qbo/sandbox/client_id --type SecureString --value '...'
  *   aws ssm put-parameter --region us-east-1 \
- *     --name /finos/qbo/client_secret --type SecureString --value '...'
+ *     --name /finos/qbo/sandbox/client_secret --type SecureString --value '...'
+ *
+ * Seed the production pair once Intuit issues production credentials —
+ * until then, connecting a company with environment "production" fails
+ * loudly rather than silently using sandbox:
+ *
+ *   aws ssm put-parameter --region us-east-1 \
+ *     --name /finos/qbo/production/client_id --type SecureString --value '...'
+ *   aws ssm put-parameter --region us-east-1 \
+ *     --name /finos/qbo/production/client_secret --type SecureString --value '...'
  */
 
 import "dotenv/config";
@@ -43,7 +55,6 @@ const ROLE_NAME = "finos-qbo-broker-role";
 // Python 3.12 is the latest stable runtime on AWS Lambda.
 // The handler string "index.handler" means: file `index.py`, function `handler`.
 const RUNTIME = "python3.12";
-const QBO_ENV = "sandbox";
 
 const FUNCTIONS = {
   "finos-qbo-auth": { file: "auth_lambda.py", timeout: 15 },
@@ -380,7 +391,6 @@ async function main() {
 
   const baseEnv = {
     SSM_PREFIX,
-    QBO_ENV,
   };
 
   // REDIRECT_URI is chicken-and-egg: it must be the auth function's own URL,
