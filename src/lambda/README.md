@@ -79,10 +79,13 @@ Copy the printed `/callback` URL into the Intuit portal under
 Settings → Redirect URIs. It must match byte for byte, including the absence of
 a trailing slash.
 
-### 5. Enroll the company
+### 5. Enroll a company
 
-Open the printed `/start` URL, sign in, approve. You get a setup code valid for
-15 minutes.
+`/start` has been removed — it wrote its CSRF state under a different SSM
+key than `/callback` read it back from, so it never actually completed a
+sign-in. Call the `connect_quickbooks` tool (with `environment: "sandbox"`
+or `"production"`) from the client that uses this connector instead; it
+starts the device-authorization flow and returns a sign-in link to open.
 
 ### 6. Verify
 
@@ -149,8 +152,8 @@ Their extension stops working on the next token request. No client-side action.
    ```
 3. Register the same `/callback` URL under Production Settings
 4. Connect the real company by passing `environment: "production"` to
-   `connect_quickbooks` — `/start` is sandbox-only and cannot enroll a
-   production company.
+   `connect_quickbooks` (see "Enroll a company" above — `/start` no
+   longer exists).
 
 The OAuth endpoint is identical for both environments. Only the API base URL
 and credential pair change, resolved per tenant by
