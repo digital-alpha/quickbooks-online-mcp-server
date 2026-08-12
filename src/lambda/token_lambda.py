@@ -13,15 +13,22 @@ The MCP server only ever holds a device credential.  The client secret and
 the tenant refresh token never leave AWS.
 
 SSM Parameter Store layout:
-  /finos/qbo/client_id                        — Intuit app client ID
-  /finos/qbo/client_secret                    — Intuit app client secret
+  /finos/qbo/sandbox/client_id                — Intuit app client ID (sandbox)
+  /finos/qbo/sandbox/client_secret             — Intuit app client secret (sandbox)
+  /finos/qbo/production/client_id              — Intuit app client ID (production)
+  /finos/qbo/production/client_secret          — Intuit app client secret (production)
   /finos/qbo/codes/<sha256>                   — setup code → tenant mapping
   /finos/qbo/creds/<sha256>                   — device credential → tenant mapping
-  /finos/qbo/states/<sha256>                  — OAuth state → poll_hash mapping
+  /finos/qbo/states/<sha256>                  — OAuth state → poll_hash/environment mapping
   /finos/qbo/pending/<sha256>                 — pending device-auth status
   /finos/qbo/tenants/<realmId>/refresh_token  — long-lived refresh token
   /finos/qbo/tenants/<realmId>/access_token   — cached short-lived access token
-  /finos/qbo/tenants/<realmId>/metadata       — realm_id, access_expires, updated_at
+  /finos/qbo/tenants/<realmId>/metadata       — realm_id, environment, access_expires, updated_at
+
+Environment is resolved per tenant (stored in each tenant's metadata),
+not globally: one broker serves both sandbox and production companies
+at once. A tenant with no "environment" key (all tenants enrolled
+before this) defaults to "sandbox" at read time.
 """
 
 import hashlib
@@ -44,14 +51,14 @@ from botocore.exceptions import ClientError
 # ---------------------------------------------------------------------------
 
 SSM_PREFIX = os.environ.get("SSM_PREFIX", "/finos/qbo")
-QBO_ENV = os.environ.get("QBO_ENV", "sandbox")
 
 TOKEN_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer"
-API_BASE = (
-    "https://quickbooks.api.intuit.com"
-    if QBO_ENV == "production"
-    else "https://sandbox-quickbooks.api.intuit.com"
-)
+
+VALID_ENVIRONMENTS = ("sandbox", "production")
+API_BASE_BY_ENV = {
+    "sandbox": "https://sandbox-quickbooks.api.intuit.com",
+    "production": "https://quickbooks.api.intuit.com",
+}
 
 # Refresh the access token this many seconds before it actually expires
 # to prevent in-flight calls from racing the expiry window.
@@ -119,36 +126,39 @@ def json_response(payload: dict, status: int = 200) -> dict:
 # ---------------------------------------------------------------------------
 
 _ssm = boto3.client("ssm")
-_param_cache: dict | None = None
+_env_config_cache: dict = {}
 
 
 # ---------------------------------------------------------------------------
-# App credentials
+# Per-environment app credentials
 # ---------------------------------------------------------------------------
 
 
-def get_app_credentials() -> dict:
+def resolve_environment_config(environment: str) -> dict:
     """
-    Return {'client_id': ..., 'client_secret': ...}.
+    Return {'client_id': ..., 'client_secret': ..., 'api_base': ...} for the
+    given environment — the single switch every caller resolves through, so
+    api_base and the credential pair can never be read independently and
+    disagree with each other.
 
-    Priority:
-      1. Environment variables (CLIENT_ID / QUICKBOOKS_CLIENT_ID, etc.)
-      2. SSM Parameter Store (cached after first fetch per warm container)
+    Raises on an unrecognized explicit value rather than coercing it to
+    "sandbox" — a caller that asked for "production" and silently got
+    sandbox back is a worse failure than a crash. Defaulting an absent
+    value to "sandbox" is the caller's job, at the point the value is read
+    (a missing tenant environment field, a missing request field) — not
+    this function's.
     """
-    global _param_cache
+    if environment not in VALID_ENVIRONMENTS:
+        raise RuntimeError(f"Unknown environment '{environment}'")
 
-    env_id = os.environ.get("CLIENT_ID") or os.environ.get("QUICKBOOKS_CLIENT_ID")
-    env_secret = (
-        os.environ.get("CLIENT_SECRET") or os.environ.get("QUICKBOOKS_CLIENT_SECRET")
-    )
-    if env_id and env_secret:
-        return {"client_id": env_id, "client_secret": env_secret}
-
-    if _param_cache:
-        return _param_cache
+    if environment in _env_config_cache:
+        return _env_config_cache[environment]
 
     resp = _ssm.get_parameters(
-        Names=[f"{SSM_PREFIX}/client_id", f"{SSM_PREFIX}/client_secret"],
+        Names=[
+            f"{SSM_PREFIX}/{environment}/client_id",
+            f"{SSM_PREFIX}/{environment}/client_secret",
+        ],
         WithDecryption=True,
     )
     found = {
@@ -156,10 +166,17 @@ def get_app_credentials() -> dict:
         for p in resp.get("Parameters", [])
     }
     if not found.get("client_id") or not found.get("client_secret"):
-        raise RuntimeError("Missing client_id / client_secret in env vars or SSM")
+        raise RuntimeError(
+            f"Missing client_id / client_secret in SSM for environment '{environment}'"
+        )
 
-    _param_cache = found
-    return _param_cache
+    config = {
+        "client_id": found["client_id"],
+        "client_secret": found["client_secret"],
+        "api_base": API_BASE_BY_ENV[environment],
+    }
+    _env_config_cache[environment] = config
+    return config
 
 
 # ---------------------------------------------------------------------------
@@ -196,14 +213,18 @@ def ssm_delete(name: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def refresh_with_intuit(refresh_token: str) -> dict:
+def refresh_with_intuit(refresh_token: str, env_config: dict) -> dict:
     """
     Exchange a refresh token for a new access+refresh token pair.
     Raises RuntimeError("refresh_rejected:<status_code>") on non-2xx responses.
+
+    Takes the already-resolved environment config rather than resolving it
+    itself, so the caller reads the environment switch exactly once per
+    request and this always uses the same credential pair as the api_base
+    the caller is about to return alongside it.
     """
-    creds = get_app_credentials()
     credential_b64 = b64encode(
-        f"{creds['client_id']}:{creds['client_secret']}".encode()
+        f"{env_config['client_id']}:{env_config['client_secret']}".encode()
     ).decode()
     payload = urllib.parse.urlencode({
         "grant_type": "refresh_token",
@@ -234,14 +255,26 @@ def refresh_with_intuit(refresh_token: str) -> dict:
 
 def handle_authorize(event: dict) -> dict:
     """Mint a state and poll token, return the Intuit consent URL."""
-    creds = get_app_credentials()
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return json_response({"error": "invalid_json"}, 400)
+
+    # Default applied here, at the read boundary — resolve_environment_config()
+    # itself raises rather than defaulting an unrecognized explicit value.
+    environment = body.get("environment", "sandbox")
+    env_config = resolve_environment_config(environment)
 
     state = secrets.token_urlsafe(24)
     poll_token = secrets.token_urlsafe(32)
 
     ssm_put(
         f"{SSM_PREFIX}/states/{sha256_hex(state)}",
-        json.dumps({"poll_hash": sha256_hex(poll_token), "expires_at": now() + 900}),
+        json.dumps({
+            "poll_hash": sha256_hex(poll_token),
+            "expires_at": now() + 900,
+            "environment": environment,
+        }),
         "String",
     )
     ssm_put(
@@ -251,7 +284,7 @@ def handle_authorize(event: dict) -> dict:
     )
 
     params = {
-        "client_id": creds["client_id"],
+        "client_id": env_config["client_id"],
         "response_type": "code",
         "scope": "com.intuit.quickbooks.accounting",
         "redirect_uri": os.environ.get("REDIRECT_URI", ""),
@@ -315,7 +348,7 @@ def sweep_expired() -> None:
     """Opportunistic cleanup. Parameter Store has no TTL of its own."""
     deleted = 0
     paginator = _ssm.get_paginator("get_parameters_by_path")
-    for folder in ("states", "pending"):
+    for folder in ("states", "pending", "codes"):
         try:
             for page_res in paginator.paginate(Path=f"{SSM_PREFIX}/{folder}/", Recursive=False):
                 batch = []
@@ -362,6 +395,13 @@ def mint_access_token(tenant_id: str) -> dict:
     except (json.JSONDecodeError, TypeError):
         return {"error": "tenant_not_enrolled"}
 
+    # One switch, read once per request: api_base and the credential pair
+    # both derive from this tenant's stored environment, so they can never
+    # end up disagreeing. Absent (pre-dual-environment tenants) defaults to
+    # "sandbox" here, at the read boundary — not inside the resolver.
+    environment = metadata.get("environment", "sandbox")
+    env_config = resolve_environment_config(environment)
+
     # Return the cached access token if it is still valid within the skew margin
     access_expires = int(metadata.get("access_expires", 0))
     if access_expires > now() + EXPIRY_SKEW_SECONDS and access_token_val:
@@ -369,14 +409,14 @@ def mint_access_token(tenant_id: str) -> dict:
             "payload": {
                 "access_token": access_token_val,
                 "realm_id": metadata["realm_id"],
-                "api_base": API_BASE,
+                "api_base": env_config["api_base"],
                 "expires_at": access_expires,
             }
         }
 
     # Access token is stale — refresh it with Intuit
     try:
-        fresh = refresh_with_intuit(refresh_token_val)
+        fresh = refresh_with_intuit(refresh_token_val, env_config)
     except RuntimeError as err:
         status_str = str(err).split(":", 1)[1] if ":" in str(err) else "unknown"
         log_event("refresh_failed", status=status_str)
@@ -394,6 +434,7 @@ def mint_access_token(tenant_id: str) -> dict:
             "realm_id": metadata["realm_id"],
             "access_expires": new_expires,
             "updated_at": now(),
+            "environment": environment,
         }),
         "String",
     )
@@ -402,7 +443,7 @@ def mint_access_token(tenant_id: str) -> dict:
         "payload": {
             "access_token": fresh["access_token"],
             "realm_id": metadata["realm_id"],
-            "api_base": API_BASE,
+            "api_base": env_config["api_base"],
             "expires_at": new_expires,
         }
     }

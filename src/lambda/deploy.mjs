@@ -7,12 +7,24 @@
  *   node deploy.mjs          create or update everything
  *   node deploy.mjs --urls   print the endpoint URLs and exit
  *
- * Run once first, with values from your Intuit app's Keys & credentials page:
+ * Run once first, with values from your Intuit app's Keys & credentials page.
+ * Seed the sandbox pair before ever deploying dual-environment code — the
+ * existing tenants default to "sandbox" and will fail to mint tokens if this
+ * path is missing:
  *
  *   aws ssm put-parameter --region us-east-1 \
- *     --name /finos/qbo/client_id --type SecureString --value '...'
+ *     --name /finos/qbo/sandbox/client_id --type SecureString --value '...'
  *   aws ssm put-parameter --region us-east-1 \
- *     --name /finos/qbo/client_secret --type SecureString --value '...'
+ *     --name /finos/qbo/sandbox/client_secret --type SecureString --value '...'
+ *
+ * Seed the production pair once Intuit issues production credentials —
+ * until then, connecting a company with environment "production" fails
+ * loudly rather than silently using sandbox:
+ *
+ *   aws ssm put-parameter --region us-east-1 \
+ *     --name /finos/qbo/production/client_id --type SecureString --value '...'
+ *   aws ssm put-parameter --region us-east-1 \
+ *     --name /finos/qbo/production/client_secret --type SecureString --value '...'
  */
 
 import "dotenv/config";
@@ -34,8 +46,6 @@ import {
   AttachRolePolicyCommand,
   PutRolePolicyCommand,
 } from "@aws-sdk/client-iam";
-// DynamoDB is no longer used in Phase 2 — all data is in SSM Parameter Store.
-import { SSMClient, PutParameterCommand } from "@aws-sdk/client-ssm";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 
 const REGION = "us-east-1";
@@ -45,7 +55,6 @@ const ROLE_NAME = "finos-qbo-broker-role";
 // Python 3.12 is the latest stable runtime on AWS Lambda.
 // The handler string "index.handler" means: file `index.py`, function `handler`.
 const RUNTIME = "python3.12";
-const QBO_ENV = "sandbox";
 
 const FUNCTIONS = {
   "finos-qbo-auth": { file: "auth_lambda.py", timeout: 15 },
@@ -380,35 +389,8 @@ async function main() {
   // DynamoDB table no longer needed — Phase 2 uses SSM Parameter Store.
   const roleArn = await ensureRole(Account);
 
-  const envClientId = process.env.CLIENT_ID || process.env.QUICKBOOKS_CLIENT_ID;
-  const envClientSecret = process.env.CLIENT_SECRET || process.env.QUICKBOOKS_CLIENT_SECRET;
-
-  if (envClientId && envClientSecret) {
-    const ssm = new SSMClient(cfg);
-    await ssm.send(
-      new PutParameterCommand({
-        Name: `${SSM_PREFIX}/client_id`,
-        Value: envClientId,
-        Type: "SecureString",
-        Overwrite: true,
-      })
-    );
-    await ssm.send(
-      new PutParameterCommand({
-        Name: `${SSM_PREFIX}/client_secret`,
-        Value: envClientSecret,
-        Type: "SecureString",
-        Overwrite: true,
-      })
-    );
-    log("seeded client_id and client_secret into SSM Parameter Store");
-  }
-
   const baseEnv = {
     SSM_PREFIX,
-    QBO_ENV,
-    ...(envClientId ? { CLIENT_ID: envClientId } : {}),
-    ...(envClientSecret ? { CLIENT_SECRET: envClientSecret } : {}),
   };
 
   // REDIRECT_URI is chicken-and-egg: it must be the auth function's own URL,
@@ -417,7 +399,6 @@ async function main() {
   await ensureFunction("finos-qbo-auth", FUNCTIONS["finos-qbo-auth"], roleArn, {
     ...baseEnv,
     REDIRECT_URI: "pending",
-    TENANT_ID: "default",
   });
   const authUrl = await ensureFunctionUrl("finos-qbo-auth");
 
@@ -428,7 +409,6 @@ async function main() {
         Variables: {
           ...baseEnv,
           REDIRECT_URI: `${authUrl}/callback`,
-          TENANT_ID: "default",
         },
       },
     })

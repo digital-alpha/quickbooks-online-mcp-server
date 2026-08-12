@@ -6,11 +6,16 @@ Lambda A: finos-qbo-auth  (Phase 2: Parameter Store Multi-Tenant)
                  and display a 15-minute single-use Setup Code.
 
 SSM Parameter Store layout:
-  /finos/qbo/client_id              — Intuit app client ID
-  /finos/qbo/client_secret          — Intuit app client secret
+  /finos/qbo/sandbox/client_id      — Intuit app client ID (sandbox)
+  /finos/qbo/sandbox/client_secret  — Intuit app client secret (sandbox)
+  /finos/qbo/production/client_id     — Intuit app client ID (production)
+  /finos/qbo/production/client_secret — Intuit app client secret (production)
   /finos/qbo/states/<state>         — CSRF state token (expires in 10 min)
   /finos/qbo/tenants/<realmId>/*    — refresh_token, access_token, metadata
   /finos/qbo/codes/<sha256>         — setup code → tenant mapping (15 min)
+
+Environment is resolved per tenant (stored in each tenant's metadata),
+not globally — see resolve_environment_config() below.
 """
 
 import hashlib
@@ -99,36 +104,40 @@ _SECURITY_HEADERS = {
 # ---------------------------------------------------------------------------
 
 _ssm = boto3.client("ssm")
-_param_cache: dict | None = None  # cache for client_id / client_secret
+_env_config_cache: dict = {}
+
+VALID_ENVIRONMENTS = ("sandbox", "production")
+API_BASE_BY_ENV = {
+    "sandbox": "https://sandbox-quickbooks.api.intuit.com",
+    "production": "https://quickbooks.api.intuit.com",
+}
 
 
 # ---------------------------------------------------------------------------
-# App credentials
+# Per-environment app credentials
 # ---------------------------------------------------------------------------
 
 
-def get_app_credentials() -> dict:
+def resolve_environment_config(environment: str) -> dict:
     """
-    Return {'client_id': ..., 'client_secret': ...}.
+    Return {'client_id': ..., 'client_secret': ..., 'api_base': ...} for the
+    given environment — the single switch every caller resolves through.
 
-    Priority:
-      1. Environment variables (CLIENT_ID / QUICKBOOKS_CLIENT_ID, etc.)
-      2. SSM Parameter Store (cached after first fetch per warm container)
+    Raises on an unrecognized explicit value rather than coercing it to
+    "sandbox". Defaulting an absent value to "sandbox" is the caller's job,
+    at the point the value is read — not this function's.
     """
-    global _param_cache
+    if environment not in VALID_ENVIRONMENTS:
+        raise RuntimeError(f"Unknown environment '{environment}'")
 
-    env_id = os.environ.get("CLIENT_ID") or os.environ.get("QUICKBOOKS_CLIENT_ID")
-    env_secret = (
-        os.environ.get("CLIENT_SECRET") or os.environ.get("QUICKBOOKS_CLIENT_SECRET")
-    )
-    if env_id and env_secret:
-        return {"client_id": env_id, "client_secret": env_secret}
-
-    if _param_cache:
-        return _param_cache
+    if environment in _env_config_cache:
+        return _env_config_cache[environment]
 
     resp = _ssm.get_parameters(
-        Names=[f"{SSM_PREFIX}/client_id", f"{SSM_PREFIX}/client_secret"],
+        Names=[
+            f"{SSM_PREFIX}/{environment}/client_id",
+            f"{SSM_PREFIX}/{environment}/client_secret",
+        ],
         WithDecryption=True,
     )
     found = {
@@ -136,10 +145,17 @@ def get_app_credentials() -> dict:
         for p in resp.get("Parameters", [])
     }
     if not found.get("client_id") or not found.get("client_secret"):
-        raise RuntimeError("Missing client_id / client_secret in env vars or SSM")
+        raise RuntimeError(
+            f"Missing client_id / client_secret in SSM for environment '{environment}'"
+        )
 
-    _param_cache = found
-    return _param_cache
+    config = {
+        "client_id": found["client_id"],
+        "client_secret": found["client_secret"],
+        "api_base": API_BASE_BY_ENV[environment],
+    }
+    _env_config_cache[environment] = config
+    return config
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +317,10 @@ def handle_callback(event: dict) -> dict:
         )
 
     poll_hash = None
+    # Default applied here, at the read boundary — the state record was
+    # written by whichever endpoint started this flow; absent means it
+    # predates dual-environment support.
+    environment = "sandbox"
     try:
         state_data = json.loads(state_val)
         if state_data.get("expires_at", 0) < int(time.time()):
@@ -311,14 +331,16 @@ def handle_callback(event: dict) -> dict:
                 400,
             )
         poll_hash = state_data.get("poll_hash")
+        environment = state_data.get("environment", "sandbox")
     except (json.JSONDecodeError, TypeError):
         pass
 
     # Delete state immediately to make it single-use
     ssm_delete(state_key)
 
-    # Exchange the authorization code for tokens with Intuit
-    creds = get_app_credentials()
+    # Exchange the authorization code for tokens with Intuit. TOKEN_URL is the
+    # same endpoint for both environments — only the credential pair differs.
+    env_config = resolve_environment_config(environment)
     tokens = post_form(
         TOKEN_URL,
         {
@@ -326,8 +348,8 @@ def handle_callback(event: dict) -> dict:
             "code": code,
             "redirect_uri": REDIRECT_URI,
         },
-        creds["client_id"],
-        creds["client_secret"],
+        env_config["client_id"],
+        env_config["client_secret"],
     )
 
     # Persist tenant tokens to SSM (refresh token first for resilience)
@@ -343,6 +365,7 @@ def handle_callback(event: dict) -> dict:
             "realm_id": realm_id,
             "access_expires": now_ts + expires_in,
             "updated_at": now_ts,
+            "environment": environment,
         }),
         "String",
     )
@@ -383,7 +406,9 @@ def handle_callback(event: dict) -> dict:
 
 
 def handle_start() -> dict:
-    creds = get_app_credentials()
+    # [TRANSITION] Legacy route, scheduled for removal — deliberately not
+    # extended with an environment choice. Always sandbox.
+    env_config = resolve_environment_config("sandbox")
 
     state = secrets.token_urlsafe(32)
     expires_at = int(time.time()) + STATE_TTL_SECONDS
@@ -395,7 +420,7 @@ def handle_start() -> dict:
     )
 
     query = urllib.parse.urlencode({
-        "client_id": creds["client_id"],
+        "client_id": env_config["client_id"],
         "response_type": "code",
         "scope": SCOPE,
         "redirect_uri": REDIRECT_URI,

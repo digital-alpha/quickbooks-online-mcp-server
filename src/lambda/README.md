@@ -138,13 +138,23 @@ Their extension stops working on the next token request. No client-side action.
 ## Going to production
 
 1. Complete Intuit's app assessment questionnaire, get production keys
-2. Overwrite the two SSM parameters with the production values
-3. Set `QBO_ENV = "production"` in `deploy.mjs`, redeploy
-4. Register the same `/callback` URL under Production Settings
-5. Run `/start` once to enroll the real company
+2. Seed the production credentials in SSM — this is a separate path from
+   sandbox, not an overwrite of it:
+   ```bash
+   aws ssm put-parameter --region us-east-1 \
+     --name /finos/qbo/production/client_id --type SecureString --value 'YOUR_PRODUCTION_CLIENT_ID'
+
+   aws ssm put-parameter --region us-east-1 \
+     --name /finos/qbo/production/client_secret --type SecureString --value 'YOUR_PRODUCTION_CLIENT_SECRET'
+   ```
+3. Register the same `/callback` URL under Production Settings
+4. Connect the real company by passing `environment: "production"` to
+   `connect_quickbooks` — `/start` is sandbox-only and cannot enroll a
+   production company.
 
 The OAuth endpoint is identical for both environments. Only the API base URL
-changes, and that switch lives in one place in `token-lambda.mjs`.
+and credential pair change, resolved per tenant by
+`resolve_environment_config()` in both `auth_lambda.py` and `token_lambda.py`.
 
 ## Going multi-tenant
 

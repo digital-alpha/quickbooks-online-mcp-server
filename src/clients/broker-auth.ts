@@ -123,7 +123,7 @@ async function handleResponse<T>(response: Response): Promise<T> {
 }
 
 /** Used by /authorize and /poll, which take JSON request bodies. */
-async function brokerPost<T>(path: string, body?: unknown): Promise<T> {
+async function brokerPost<T>(path: string, body: unknown): Promise<T> {
   const brokerUrl = getBrokerUrl();
 
   let response: Response;
@@ -131,7 +131,7 @@ async function brokerPost<T>(path: string, body?: unknown): Promise<T> {
     response = await fetch(`${brokerUrl}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: body === undefined ? '{}' : JSON.stringify(body),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(15_000),
     });
   } catch (error) {
@@ -178,14 +178,19 @@ export interface AuthorizationStart {
   authUrl: string;
 }
 
+export type QboEnvironment = 'sandbox' | 'production';
+
 /**
  * Begins an authorization. The broker generates both the OAuth state and the
  * poll token, so neither is client-controlled and the flow cannot be fixated by
  * a caller supplying a value of their own.
  */
-export async function startAuthorization(): Promise<AuthorizationStart> {
+export async function startAuthorization(
+  environment: QboEnvironment = 'sandbox',
+): Promise<AuthorizationStart> {
   const result = await brokerPost<{ auth_url: string; poll_token: string }>(
     '/authorize',
+    { environment },
   );
 
   // Stored in the session bucket for this chat.

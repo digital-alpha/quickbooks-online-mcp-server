@@ -1,11 +1,11 @@
-import { startAuthorization, disconnectQuickbooks } from "../clients/broker-auth.js";
+import { startAuthorization, disconnectQuickbooks, QboEnvironment } from "../clients/broker-auth.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
-export async function connectQuickbooks(): Promise<ToolResponse<any>> {
+export async function connectQuickbooks(environment?: QboEnvironment): Promise<ToolResponse<any>> {
   try {
     disconnectQuickbooks();
-    const { authUrl } = await startAuthorization();
+    const { authUrl } = await startAuthorization(environment);
     return {
       result: {
         authorization_link: `[Connect to QuickBooks](${authUrl})`,
