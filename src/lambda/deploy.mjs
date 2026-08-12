@@ -361,8 +361,10 @@ function printUrls(authUrl, tokenUrl) {
   console.log("\n" + "=".repeat(68));
   console.log("Register this as the Redirect URI in the Intuit portal:");
   console.log(`  ${authUrl}/callback`);
-  console.log("\nSend teammates here to connect:");
-  console.log(`  ${authUrl}/start`);
+  console.log("\nRegister these in the Intuit portal (Launch / Disconnect / Connect-Reconnect):");
+  console.log(`  ${authUrl}/launch`);
+  console.log(`  ${authUrl}/disconnected`);
+  console.log(`  ${authUrl}/reconnect`);
   console.log("\nBroker base URL for the MCP server (FINOS_BROKER_URL):");
   console.log(`  ${tokenUrl}`);
   console.log("=".repeat(68) + "\n");

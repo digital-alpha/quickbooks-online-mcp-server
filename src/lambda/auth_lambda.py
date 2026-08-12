@@ -1,9 +1,11 @@
 """
 Lambda A: finos-qbo-auth  (Phase 2: Parameter Store Multi-Tenant)
 
-  GET /start     Redirect the user to Intuit's consent screen.
-  GET /callback  Exchange the auth code, store tokens in Parameter Store,
-                 and display a 15-minute single-use Setup Code.
+  GET /callback      Exchange the auth code, store tokens in Parameter Store,
+                     and display a 15-minute single-use Setup Code.
+  GET /disconnected  Intuit's registered Disconnect URL — instructional page.
+  GET /reconnect     Intuit's registered Connect/Reconnect URL — instructional page.
+  GET /launch        Intuit's registered Launch URL — instructional page.
 
 SSM Parameter Store layout:
   /finos/qbo/sandbox/client_id      — Intuit app client ID (sandbox)
@@ -40,12 +42,9 @@ from botocore.exceptions import ClientError
 SSM_PREFIX = os.environ.get("SSM_PREFIX", "/finos/qbo")
 REDIRECT_URI = os.environ.get("REDIRECT_URI", "")
 
-AUTHORIZE_URL = "https://appcenter.intuit.com/connect/oauth2"
 TOKEN_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer"
-SCOPE = "com.intuit.quickbooks.accounting"
 
 SETUP_CODE_TTL_SECONDS = 900   # 15 minutes
-STATE_TTL_SECONDS = 600         # 10 minutes
 HTTP_TIMEOUT_SECONDS = 10
 
 # State tokens are base64url — only allow those characters (plus length cap)
@@ -394,43 +393,55 @@ def handle_callback(event: dict) -> dict:
 
     return page(
         "QuickBooks connected",
-        "<p>You can close this tab and return to Claude.</p>",
+        "<p>You can close this tab and return to the application you "
+        "connected from.</p>",
     )
 
 
 # ---------------------------------------------------------------------------
-# [TRANSITION] Route: GET /start  —  Remove once all clients are on v1.1.0
-# v1.0.0's manifest points users at /start to begin the setup-code flow.
-# The device-flow (/authorize on the token Lambda) supersedes this in v1.1.0.
+# Route: GET /disconnected  —  Intuit's registered Disconnect URL
 # ---------------------------------------------------------------------------
 
 
-def handle_start() -> dict:
-    # [TRANSITION] Legacy route, scheduled for removal — deliberately not
-    # extended with an environment choice. Always sandbox.
-    env_config = resolve_environment_config("sandbox")
-
-    state = secrets.token_urlsafe(32)
-    expires_at = int(time.time()) + STATE_TTL_SECONDS
-
-    ssm_put(
-        f"{SSM_PREFIX}/states/{state}",
-        json.dumps({"expires_at": expires_at}),
-        "String",
+def handle_disconnected() -> dict:
+    return page(
+        "QuickBooks disconnected",
+        "<p>This app has been disconnected from QuickBooks Online. Other "
+        "QuickBooks companies you've connected are unaffected.</p>"
+        "<p>To reconnect, return to the application you use this connector "
+        "with and start the connection again.</p>"
+        "<p>You can close this tab.</p>",
     )
 
-    query = urllib.parse.urlencode({
-        "client_id": env_config["client_id"],
-        "response_type": "code",
-        "scope": SCOPE,
-        "redirect_uri": REDIRECT_URI,
-        "state": state,
-    })
-    return {
-        "statusCode": 302,
-        "headers": {"Location": f"{AUTHORIZE_URL}?{query}", **_SECURITY_HEADERS},
-        "body": "",
-    }
+
+# ---------------------------------------------------------------------------
+# Route: GET /reconnect  —  Intuit's registered Connect/Reconnect URL
+# ---------------------------------------------------------------------------
+
+
+def handle_reconnect() -> dict:
+    return page(
+        "Reconnect QuickBooks",
+        "<p>To connect or reconnect QuickBooks Online, return to the "
+        "application you use this connector with and start the connection "
+        "from there. You'll be given a sign-in link to open.</p>"
+        "<p>You can close this tab.</p>",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Route: GET /launch  —  Intuit's registered Launch URL
+# ---------------------------------------------------------------------------
+
+
+def handle_launch() -> dict:
+    return page(
+        "QuickBooks connected",
+        "<p>This app runs inside your connected application, not as a "
+        "standalone web page. Return to the application you connected "
+        "from to use QuickBooks tools there.</p>"
+        "<p>You can close this tab.</p>",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -443,11 +454,14 @@ def handler(event: dict, context) -> dict:  # noqa: ANN001
     path = raw_path.rstrip("/")
 
     try:
-        # [TRANSITION] Remove /start once all clients are on v1.1.0
-        if path.endswith("/start"):
-            return handle_start()
         if path.endswith("/callback") or path == "":
             return handle_callback(event)
+        if path.endswith("/disconnected"):
+            return handle_disconnected()
+        if path.endswith("/reconnect"):
+            return handle_reconnect()
+        if path.endswith("/launch"):
+            return handle_launch()
         return page("Not found", "<p>Unknown path.</p>", 404)
 
     except RuntimeError as err:
